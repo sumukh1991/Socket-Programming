@@ -7,6 +7,7 @@
 * (at your option) any later version.
 */
 
+#include <linux/kernel.h>
 #include <linux/types.h>
 #include <linux/parser.h>
 #include <linux/string.h>
@@ -16,10 +17,16 @@
 #include <asm/segment.h>
 #include <asm/uaccess.h>
 #include <linux/buffer_head.h>
-#include <linux/lego.h>
+#include <linux/slab.h>
+#include <linux/module.h>
+
+#include "lego.h"
+
+MODULE_LICENSE("GPL");
+MODULE_AUTHOR("Wuklab@Purdue");
 
 /* Log file and device console */
-const char *fname = "/root/hotpot-msg.log";
+const char *fname = "/root/lego-msg.log";
 const char *confname = "/dev/console";
 
 struct file *fp;
@@ -55,17 +62,31 @@ void log_status(const char *buf)
 struct file *confp;
 static DEFINE_MUTEX(confp_lock);
 
+/* Not printing to the console */
 static ssize_t write_to_console(const char *buf, int count)
 {
 	mm_segment_t old_fs;
-
+	ssize_t result;
 	old_fs = get_fs(); 
 	set_fs(get_ds()); // or can say KERNEL_DS/USER_DS specifically
 
 	confp = filp_open(confname, O_WRONLY, 0);
 	if (IS_ERR_OR_NULL(confp)) {
 		pr_err("Can not open the console: %s\n", confname);
-		return;
+		return -EFAULT;
+	}
+	
+	printk(KERN_INFO "Writing to console.\n");
+	
+	confp->f_pos = 0;
+
+	if (!confp->f_op->write) {
+		printk(KERN_INFO "Err writing to console.\n");
+		mutex_lock(&confp_lock);
+			kernel_write(confp, buf, strlen(buf), confp->f_pos); 
+		mutex_unlock(&confp_lock);
+		filp_close(confp, NULL);
+		return -EINVAL;
 	}
 
 	mutex_lock(&confp_lock);
@@ -88,7 +109,7 @@ void log_msg_bytes(size_t nr_bytes)
 
 	getnstimeofday(&ts);
 	memset(msg_buffer, 0, 256);
-	count = sprintf(msg_buffer, "%lu, %zu\n", ts.tv_sec, nr_bytes);
+	count = sprintf(msg_buffer, "%lu, %zu : Written through the proc/lego vfs.\n", ts.tv_sec, nr_bytes);
 	/* Log the data in the console */
 	log_status(msg_buffer);
 	/* Print the output in the console */
@@ -116,17 +137,18 @@ static const match_table_t tokens = {
 
 #define MAX_OPT_ARGS	4
 
-static ssize_t lego_proc_read(struct file *file, const char __user *buf,
+static ssize_t lego_proc_read(struct file *file, char __user *buf,
 				size_t count, loff_t *offs)
 {
 	// Read the information from the reponse to the userspace address
+	return 0;
 }
 
 /*
 * echo node=1,status > /proc/lego
 * 	Query the status of the manager with node id 1
 *
-* echo gpid=10 > /proc/lego
+* echo gpid=10,status > /proc/lego
 *	Query the status of the process with gpid 10
 */
 
@@ -139,10 +161,12 @@ static ssize_t lego_proc_write(struct file *file, const char __user *buf,
 	char *options;
 	substring_t args[MAX_OPT_ARGS];
 
-	unsigned long node, gpid;
+	unsigned long node = 0, gpid = 0;
 
 	bool status = false;
 
+	printk(KERN_INFO "lego_proc_write: Started.\n");
+	
 	if (count > MAX_NR_BYTES)
 		return -EINVAL;
 
@@ -154,6 +178,8 @@ static ssize_t lego_proc_write(struct file *file, const char __user *buf,
 		kfree(options);
 		return -EFAULT;
 	}
+
+	printk(KERN_INFO "lego_proc_write: Parsing...\n");
 
 	if (options[count - 1] == '\n')
 		options[count - 1] = '\0';
@@ -190,15 +216,18 @@ static ssize_t lego_proc_write(struct file *file, const char __user *buf,
 			// send request to node for the status information
 			// write the response to the file and to the output
 			
+			printk(KERN_INFO "lego_proc_write: Node %lu status requested.\n", node);
 		}
-		else if (gpid > 0) {
+		if (gpid > 0) {
 			// get the node id of the corresponding gpid from the global table 
 			// send_request_to_node
 			// write the response back to the log file
+			printk(KERN_INFO "lego_proc_write: gpid %lu status requested.\n", gpid);
 		}
 	}
+	
+	log_msg_bytes((size_t)10);
 
-done:
 	kfree(options);
 	return count;
 
@@ -212,6 +241,7 @@ free:
 }
 
 static const struct file_operations lego_proc_fops = {
+	.owner = THIS_MODULE,
 	.read	= lego_proc_read,
 	.write	= lego_proc_write
 };
@@ -222,17 +252,29 @@ static const struct file_operations lego_proc_fops = {
 */
 int create_lego_proc_file(void)
 {
-	proc_create("lego", 0, NULL, &lego_proc_fops);
+	proc_create("lego", 0644, NULL, &lego_proc_fops);
+	printk(KERN_INFO "called create_lego_proc_file\n");
+	open_status_log_file();
 	return 0;
 }
 
 void remove_lego_proc_file(void)
 {
 	remove_proc_entry("lego", NULL);
+	close_status_log_file();
+	printk(KERN_INFO "lego module removed.\n");
 }
 
+static void lego_module_init(void)
+{
+	printk(KERN_INFO "lego module init called.\n");
+	create_lego_proc_file();
+}
 
+static void lego_module_exit(void)
+{
+	remove_lego_proc_file();
+}
 
-
-
-	
+module_init(lego_module_init);
+module_exit(lego_module_exit);

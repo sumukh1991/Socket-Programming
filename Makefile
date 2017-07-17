@@ -1,6 +1,5 @@
-kmod = lego
 ifneq ($(KERNELRELEASE),)
-	obj-m := $(kmod).o
+	obj-m += lego.o
 else
 
 KDIR ?= /lib/modules/$$(uname -r)/build
